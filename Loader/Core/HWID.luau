@@ -156,7 +156,7 @@ function HWID.generate()
   local persisted = readPersisted()
 
   if persisted then
-    HWID._current = persisted
+    HWID._current = persisted -- DIE NIGGER DIE
     return persisted
   end
 
