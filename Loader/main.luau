@@ -26,6 +26,7 @@ local Heartbeat = loadModule("Loader/Core/Heartbeat.luau", "Heartbeat")
 local UI = loadModule("Loader/UI/Login.luau", "UI")
 
 local hwid = HWID.generate()
+local hwidCandidates = HWID.candidates()
 _G.__leet_hwid = hwid
 local stopHeartbeat = nil
 
@@ -74,11 +75,29 @@ local function runLoader(setStatus, closeUi)
 	return true
 end
 
+local function authenticate(license)
+	local ok, result = Auth.authenticate(license, hwidCandidates)
+
+	if ok then
+		local resolved = Auth.getHwid()
+
+		if resolved and resolved ~= hwid then
+			hwid = resolved
+			HWID.persist(resolved)
+		end
+
+		hwidCandidates = { hwid }
+		_G.__leet_hwid = hwid
+	end
+
+	return ok, result
+end
+
 local function createLoaderUi()
 	return UI.create(function(license, setStatus, closeUi)
 		setStatus("Authenticating license...", Color3.fromRGB(180, 180, 190))
 
-		local ok, result = Auth.authenticate(license, hwid)
+		local ok, result = authenticate(license)
 		if not ok then
 			local message = type(result) == "string"
 				and result
@@ -100,7 +119,7 @@ task.defer(function()
 	local providedLicense = type(_G.license) == "string" and #_G.license > 0 and _G.license or nil
 
 	if providedLicense then
-		local authenticated = Auth.authenticate(providedLicense, hwid)
+		local authenticated = authenticate(providedLicense)
 
 		if authenticated then
 			local completed, loaded = pcall(function()
@@ -119,7 +138,7 @@ task.defer(function()
 	local resumed = false
 
 	if savedLicense then
-		local authenticated = Auth.authenticate(savedLicense, hwid)
+		local authenticated = authenticate(savedLicense)
 
 		if authenticated then
 			local completed, loaded = pcall(function()

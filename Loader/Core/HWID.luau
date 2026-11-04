@@ -1,155 +1,171 @@
-local baseUrl = "https://raw.githubusercontent.com/VoltSec3/leetware/main/"
-local subloaderUrl = baseUrl .. "Loader/Subloader.luau"
+local HttpService = game:GetService("HttpService")
 
-local function loadModule(path, name)
-	local source = game:HttpGet(baseUrl .. path)
-	local chunk, compileError = loadstring(source)
-
-	assert(
-		chunk,
-		string.format("Failed to compile %s: %s", name, tostring(compileError))
-	)
-
-	return chunk()
-end
-
--- Install the runtime guard before anything else. This publishes the loader
--- handle that every game and module script verifies before executing, so the
--- scripts cannot be run outside the loader.
-local Guard = loadModule("Loader/Core/Guard.luau", "Guard")
-Guard.install()
-
-local Config = loadModule("Loader/Core/Config.luau", "Config")
-local HWID = loadModule("Loader/Core/HWID.luau", "HWID")
-local Auth = loadModule("Loader/Core/Auth.luau", "Auth")
-local Heartbeat = loadModule("Loader/Core/Heartbeat.luau", "Heartbeat")
-local UI = loadModule("Loader/UI/Login.luau", "UI")
-
-local hwid = HWID.generate()
-local hwidCandidates = HWID.candidates()
-_G.__leet_hwid = hwid
-local stopHeartbeat = nil
-
-local function startHeartbeat()
-	if stopHeartbeat then
-		stopHeartbeat()
-	end
-
-	stopHeartbeat = Heartbeat.start(Auth, hwid, Config.HEARTBEAT_INTERVAL, function()
-		warn("[leetware] Session invalidated. Reload the loader.")
-	end)
-end
-
-local function runSubloader()
-	local source = game:HttpGet(subloaderUrl)
-	local chunk, compileError = loadstring(source)
-
-	assert(
-		chunk,
-		string.format("Failed to compile subloader: %s", tostring(compileError))
-	)
-
-	return chunk()(Auth, hwid)
-end
-
-local function runLoader(setStatus, closeUi)
-	setStatus("Validating session...", Color3.fromRGB(180, 180, 190))
-
-	local valid = Auth.validate(hwid)
-	if not valid then
-		return false, "Session validation failed"
-	end
-
-	setStatus("Loading game module...", Color3.fromRGB(180, 180, 190))
-
-	local ok, err = pcall(function()
-		runSubloader()
-	end)
-
-	if not ok then
-		return false, err
-	end
-
-	startHeartbeat()
-	closeUi()
-	return true
-end
-
-local function authenticate(license)
-	local ok, result = Auth.authenticate(license, hwidCandidates)
-
-	if ok then
-		local resolved = Auth.getHwid()
-
-		if resolved and resolved ~= hwid then
-			hwid = resolved
-			HWID.persist(resolved)
-		end
-
-		hwidCandidates = { hwid }
-		_G.__leet_hwid = hwid
-	end
-
-	return ok, result
-end
-
-local function createLoaderUi()
-	return UI.create(function(license, setStatus, closeUi)
-		setStatus("Authenticating license...", Color3.fromRGB(180, 180, 190))
-
-		local ok, result = authenticate(license)
-		if not ok then
-			local message = type(result) == "string"
-				and result
-				or (result and result.error)
-				or "Authentication failed"
-
-			return false, message
-		end
-
-		return runLoader(setStatus, closeUi)
-	end)
-end
-
-task.defer(function()
-	-- Optional pre-provided license. Lets you bootstrap the loader without the
-	-- saved-license / login UI flow, e.g. when the auto system is unavailable:
-	--   license = "AAAA-BBBB-CCCC-DDDD"
-	--   loadstring(game:HttpGet("https://raw.githubusercontent.com/VoltSec3/leetware/main/Loader/main.luau"))()
-	local providedLicense = type(_G.license) == "string" and #_G.license > 0 and _G.license or nil
-
-	if providedLicense then
-		local authenticated = authenticate(providedLicense)
-
-		if authenticated then
-			local completed, loaded = pcall(function()
-				return runLoader(function() end, function() end)
-			end)
-
-			if completed and loaded == true then
-				return
-			end
-		end
-
-		warn("[leetware] Provided license failed to authenticate; falling back to saved license / login UI.")
-	end
-
-	local savedLicense = Auth.loadLicense()
-	local resumed = false
-
-	if savedLicense then
-		local authenticated = authenticate(savedLicense)
-
-		if authenticated then
-			local completed, loaded = pcall(function()
-				return runLoader(function() end, function() end)
-			end)
-
-			resumed = completed and loaded == true
-		end
-	end
-
-	if not resumed then
-		createLoaderUi()
-	end
+local okAnalytics, RbxAnalyticsService = pcall(function()
+  return game:GetService("RbxAnalyticsService")
 end)
+
+if not okAnalytics then
+  RbxAnalyticsService = nil
+end
+
+local HWID = {}
+HWID.FILE = "leetware/hwid.txt"
+HWID._current = nil
+
+local function trim(value)
+  if type(value) ~= "string" then
+    return nil
+  end
+
+  value = value:gsub("^%s+", ""):gsub("%s+$", "")
+
+  if value == "" then
+    return nil
+  end
+
+  return value
+end
+
+local function encode(value)
+  value = trim(value)
+
+  if not value then
+    return nil
+  end
+
+  local ok, digest = pcall(function()
+    return HttpService:Base64Encode(value)
+  end)
+
+  return ok and digest or value
+end
+
+local function readPersisted()
+  if not readfile or not isfile then
+    return nil
+  end
+
+  local ok, value = pcall(function()
+    if not isfile(HWID.FILE) then
+      return nil
+    end
+
+    return readfile(HWID.FILE)
+  end)
+
+  if not ok then
+    return nil
+  end
+
+  return trim(value)
+end
+
+local function writePersisted(value)
+  if not writefile then
+    return false
+  end
+
+  local ok = pcall(function()
+    if makefolder and isfolder and not isfolder("leetware") then
+      makefolder("leetware")
+    end
+
+    writefile(HWID.FILE, value)
+  end)
+
+  return ok
+end
+
+local function readExecutorHwid()
+  if typeof(gethwid) ~= "function" then
+    return nil
+  end
+
+  local ok, value = pcall(gethwid)
+
+  if not ok then
+    return nil
+  end
+
+  return trim(value)
+end
+
+local function readAnalyticsId()
+  if not RbxAnalyticsService then
+    return nil
+  end
+
+  local ok, id = pcall(function()
+    return RbxAnalyticsService:GetClientId()
+  end)
+
+  if not ok then
+    return nil
+  end
+
+  return trim(id)
+end
+
+-- Persist the resolved HWID so it stays the same for every future run. The
+-- value written here is the final (already encoded) value sent to the API.
+function HWID.persist(value)
+  value = trim(value)
+
+  if not value then
+    return nil
+  end
+
+  HWID._current = value
+  writePersisted(value)
+
+  return value
+end
+
+-- Returns every HWID value this install could have used, most stable first.
+-- Authentication retries these so an activation created by an older loader
+-- version (or by the analytics fallback) can still be recovered.
+function HWID.candidates()
+  local list = {}
+  local seen = {}
+
+  local function add(value)
+    value = trim(value)
+
+    if not value or seen[value] then
+      return
+    end
+
+    seen[value] = true
+    list[#list + 1] = value
+  end
+
+  add(HWID._current)
+  add(readPersisted())
+
+  -- Executor-provided HWIDs are designed to survive sessions. Roblox's
+  -- analytics client id is only a fallback: depending on the executor/client
+  -- build it can change between launches, which would break an activation.
+  add(encode(readExecutorHwid()))
+  add(encode(readAnalyticsId()))
+  add(encode("unknown-hwid"))
+
+  return list
+end
+
+function HWID.generate()
+  local persisted = readPersisted()
+
+  if persisted then
+    HWID._current = persisted
+    return persisted
+  end
+
+  local candidates = HWID.candidates()
+  local value = candidates[1] or encode("unknown-hwid")
+
+  HWID.persist(value)
+
+  return value
+end
+
+return HWID
