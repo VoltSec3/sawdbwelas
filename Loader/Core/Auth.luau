@@ -7,6 +7,7 @@ local Config = loadstring(game:HttpGet(
 local Auth = {}
 Auth._sessionToken = nil
 Auth._sessionExpiresAt = 0
+Auth._hwid = nil
 
 local function request(method, path, body, headers)
 	headers = headers or {}
@@ -142,6 +143,10 @@ function Auth.getSessionToken()
 	return Auth._sessionToken
 end
 
+function Auth.getHwid()
+	return Auth._hwid
+end
+
 -- Best-effort game context so the API can auto-register new games.
 local function gameContext()
 	if not Config.REPORT_GAME_CONTEXT then
@@ -173,24 +178,97 @@ local function withGameContext(body)
 	return body
 end
 
+local function hwidCandidates(hwid)
+	if type(hwid) == "table" then
+		local candidates = {}
+		local seen = {}
+
+		for _, value in ipairs(hwid) do
+			if type(value) == "string" and value ~= "" and not seen[value] then
+				seen[value] = true
+				candidates[#candidates + 1] = value
+			end
+		end
+
+		return candidates
+	end
+
+	if type(hwid) == "string" and hwid ~= "" then
+		return { hwid }
+	end
+
+	return {}
+end
+
+local function isHwidRejection(data)
+	if type(data) ~= "table" then
+		return false
+	end
+
+	local message = data.error or data.message or data.reason
+
+	if type(message) ~= "string" then
+		return false
+	end
+
+	local normalized = string.lower(message)
+
+	return string.find(normalized, "hwid", 1, true) ~= nil
+		or string.find(normalized, "another device", 1, true) ~= nil
+end
+
 function Auth.authenticate(license, hwid)
+	local candidates = hwidCandidates(hwid)
 	local savedSession = Auth.loadSession()
 	local player = game:GetService("Players").LocalPlayer
-	local identity = {
-		metadata = {
-			robloxUsername = (player and player.Name) or nil,
-			robloxDisplayName = (player and player.DisplayName) or nil,
-			robloxUserId = (player and player.UserId) or nil,
-		},
+	local metadata = {
+		robloxUsername = (player and player.Name) or nil,
+		robloxDisplayName = (player and player.DisplayName) or nil,
+		robloxUserId = (player and player.UserId) or nil,
 	}
 
+	-- Try each candidate HWID, but only keep retrying when the server rejected
+	-- the HWID. Any other failure (invalid license, rate limit, allowlist) is
+	-- returned immediately so we do not burn extra requests.
+	local function attempt(path, body)
+		if #candidates == 0 then
+			return false, "No usable HWID"
+		end
+
+		local lastData = nil
+
+		for _, candidate in ipairs(candidates) do
+			local payload = {}
+
+			for key, value in pairs(body) do
+				payload[key] = value
+			end
+
+			payload.hwid = candidate
+
+			local ok, data = request("POST", path, withGameContext(payload))
+
+			if ok then
+				Auth._hwid = candidate
+				return true, data
+			end
+
+			lastData = data
+
+			if not isHwidRejection(data) then
+				return false, data
+			end
+		end
+
+		return false, lastData
+	end
+
 	if savedSession then
-		local ok, data = request("POST", "/auth/session", withGameContext({
+		local ok, data = attempt("/auth/session", {
 			sessionToken = savedSession,
-			hwid = hwid,
 			clientVersion = Config.CLIENT_VERSION,
-			metadata = identity.metadata,
-		}))
+			metadata = metadata,
+		})
 
 		if ok then
 			Auth.saveSession(data.sessionToken, os.time() + 900)
@@ -198,12 +276,11 @@ function Auth.authenticate(license, hwid)
 		end
 	end
 
-	local ok, data = request("POST", "/auth/activate", withGameContext({
+	local ok, data = attempt("/auth/activate", {
 		license = license,
-		hwid = hwid,
 		clientVersion = Config.CLIENT_VERSION,
-		metadata = identity.metadata,
-	}))
+		metadata = metadata,
+	})
 
 	if ok then
 		Auth.saveLicense(license)
@@ -211,12 +288,11 @@ function Auth.authenticate(license, hwid)
 		return true, data
 	end
 
-	ok, data = request("POST", "/auth/session", withGameContext({
+	ok, data = attempt("/auth/session", {
 		license = license,
-		hwid = hwid,
 		clientVersion = Config.CLIENT_VERSION,
-		metadata = identity.metadata,
-	}))
+		metadata = metadata,
+	})
 
 	if ok then
 		Auth.saveLicense(license)
