@@ -1,5 +1,5 @@
 return {
-	API_BASE = "https://api.leet.voltsec.xyz/api",
+	API_BASE = "https://api.leetware.lol/api",
 	CLIENT_VERSION = "1.0.2",
 	HEARTBEAT_INTERVAL = 60,
 	SESSION_FILE = "leetware/session.json",
